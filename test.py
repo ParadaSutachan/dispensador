@@ -3,11 +3,15 @@
 import time
 import pigpio
 from hx711 import HX711  # Importar la clase HX711
-import RPi.GPIO as GPIO  # type: ignore # Importar GPIO para la galga
-
+import RPi.GPIO as GPIO  # Importar GPIO para la galga
+import math
+from pytictoc import TicToc
 
 # Inicialización de Pigpio
 pi = pigpio.pi()
+pi_m = math.pi
+
+t1 = TicToc()
 
 # Configuración de pines de motor y encoder
 motor1_pwm_pin = 12
@@ -22,7 +26,7 @@ PIN_ENCODER_B = 17
 PIN_ENCODER2_A = 16
 PIN_ENCODER2_B = 19
 
-INTERVALO = 0.5  # Intervalo de tiempo en segundos para cálculo de RPM
+INTERVALO = 0.3  # Intervalo de tiempo en segundos para cálculo de RPM
 
 # Contadores de flancos
 numero_flancos_A = 0
@@ -69,10 +73,10 @@ def contador_flancos_encoder_b2(gpio, level, tick):
     numero_flancos_B2 += 1
 
 # Configuración de callbacks
-cb1 = pi.callback(PIN_ENCODER_A, pigpio.EITHER_EDGE, contador_flancos_encoder)
-#b2 = pi.callback(PIN_ENCODER_B, pigpio.EITHER_EDGE, contador_flancos_encoder_b)
-cb3 = pi.callback(PIN_ENCODER2_A, pigpio.EITHER_EDGE, contador_flancos_encoder2)
-#cb4 = pi.callback(PIN_ENCODER2_B, pigpio.EITHER_EDGE, contador_flancos_encoder_b2)
+cb1 = pi.callback(PIN_ENCODER_A, pigpio.RISING_EDGE, contador_flancos_encoder)
+b2 = pi.callback(PIN_ENCODER_B, pigpio.RISING_EDGE, contador_flancos_encoder_b)
+cb3 = pi.callback(PIN_ENCODER2_A, pigpio.RISING_EDGE, contador_flancos_encoder2)
+cb4 = pi.callback(PIN_ENCODER2_B, pigpio.RISING_EDGE, contador_flancos_encoder_b2)
 
 # Función para controlar el motor
 def control_motor(pin_pwm, pin_dir, speed_percent, direction):
@@ -148,11 +152,13 @@ def control_motores_y_medicion():
             output_file.write("Tiempo\t PWM \t Velocidad Angular\t RPM \tPeso (g)\t Voltaje \n")
 
             # Bucle principal
-            while time.time() - start_time <= 120:  # Ejecutar durante 30 segundos
+            while time.time() - start_time <= 120:  # Ejecutar durante 120 segundos
+                # Controlar el tiempo de muestreo
+                loop_start_time = t1.tic()
+                
+                # Obtener velocidades de los motores
                 line1 = lines[current_line1].strip()
                 line2 = lines[current_line2].strip()
-
-                # Obtener velocidades de los motores
                 motor1_speed = int(line1)
                 motor2_speed = int(line2)
 
