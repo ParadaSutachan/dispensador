@@ -2,9 +2,9 @@
 #!/usr/bin/env python3
 import time
 import pigpio
-from hx711 import HX711  # Importar la clase HX711
-import RPi.GPIO as GPIO  # Importar GPIO para la galga
+import RPi.GPIO as GPIO
 import math
+import serial
 from pytictoc import TicToc
 
 # Inicialización de Pigpio
@@ -12,6 +12,11 @@ pi = pigpio.pi()
 pi_m = math.pi
 
 t1 = TicToc()
+t2 = TicToc()
+salto_linea = 0
+
+arduino_port = '/dev/ttyACM0'  # Puerto donde está conectada la placa Arduino
+arduino_baud = 9600
 
 # Configuración de pines de motor y encoder
 motor1_pwm_pin = 12
@@ -26,7 +31,7 @@ PIN_ENCODER_B = 17
 PIN_ENCODER2_A = 16
 PIN_ENCODER2_B = 19
 
-INTERVALO = 0.3  # Intervalo de tiempo en segundos para cálculo de RPM
+INTERVALO = 0.2  # Intervalo de tiempo en segundos para cálculo de RPM
 
 # Contadores de flancos
 numero_flancos_A = 0
@@ -73,10 +78,8 @@ def contador_flancos_encoder_b2(gpio, level, tick):
     numero_flancos_B2 += 1
 
 # Configuración de callbacks
-cb1 = pi.callback(PIN_ENCODER_A, pigpio.RISING_EDGE, contador_flancos_encoder)
-b2 = pi.callback(PIN_ENCODER_B, pigpio.RISING_EDGE, contador_flancos_encoder_b)
-cb3 = pi.callback(PIN_ENCODER2_A, pigpio.RISING_EDGE, contador_flancos_encoder2)
-cb4 = pi.callback(PIN_ENCODER2_B, pigpio.RISING_EDGE, contador_flancos_encoder_b2)
+cb1 = pi.callback(PIN_ENCODER_A, pigpio.EITHER_EDGE, contador_flancos_encoder)
+cb3 = pi.callback(PIN_ENCODER2_A, pigpio.EITHER_EDGE, contador_flancos_encoder2)
 
 # Función para controlar el motor
 def control_motor(pin_pwm, pin_dir, speed_percent, direction):
@@ -91,44 +94,23 @@ def control_motor(pin_pwm, pin_dir, speed_percent, direction):
         raise ValueError("Dirección no válida. Usa 'forward' o 'backward'.")
 
 # Variables globales para la galga
-hx = None
 peso_actual = 0.0
 GPIO.setwarnings(False)  # Eliminar los warnings
-GPIO.setmode(GPIO.BCM)  # Pines GPIO en numeración BCM
+arduino = serial.Serial(arduino_port, arduino_baud)
+time.sleep(10)  # Esperar a que la conexión serial se establezca
 
-# Función para calibrar la galga
-def calibrar_galga():
-    global hx
-    hx = HX711(dout_pin=21, pd_sck_pin=20)
-    # Medir la tara y guardar el valor como compensación
-    err = hx.zero()
-    if err:
-        raise ValueError('La tara no se puede definir.')
-    
-    # Calibración de la galga con un peso conocido
-    input('Coloque un peso conocido en la balanza y luego presione Enter')
-    reading = hx.get_data_mean()
-    
-    if reading:
-        print(reading)
-        known_weight_grams = input('Escriba cuántos gramos eran y presiona Enter: ')
-        try:
-            value = float(known_weight_grams)
-            print(value, 'gramos')
-        except ValueError:
-            print('Entero o flotante esperado y tengo:', known_weight_grams)
-        # Calcular la relación de escala para el canal A y ganancia 128
-        ratio = reading / value
-        hx.set_scale_ratio(ratio)
-        print('Galga calibrada.')
-        time.sleep(10)
-    
-    print(hx.get_weight_mean(20))
-    print('Iniciando la medición y control de los motores.')
+def esperar_inicializacion_arduino():
+    while True:
+        if arduino.in_waiting > 0:
+            mensaje = arduino.readline().decode('utf-8').strip()
+            if mensaje == "Listo para pesar":
+                print("Arduino ha completado la inicialización.")
+                break
+            else:
+                print(f"Mensaje de Arduino: {mensaje}")
 
-# Función principal para control de motores, cálculo de RPM y medición de peso
 def control_motores_y_medicion():
-    global numero_flancos_A, numero_flancos_B, numero_flancos_A2, numero_flancos_B2, RPM, RPM2, RPS, RPS2, peso_actual, v1, v2
+    global numero_flancos_A, numero_flancos_B, numero_flancos_A2, numero_flancos_B2, RPM, RPM2, RPS, RPS2, peso_actual, v1, v2, salto_linea
     
     # Habilitar motores
     pi.write(motor1_en_pin, 1)
@@ -143,18 +125,22 @@ def control_motores_y_medicion():
         total_lines = len(lines)
         current_line1 = 0
         current_line2 = 0
+        
+        peso_actual = arduino.readline().decode('utf-8')
+        print(peso_actual)
 
         start_time = time.time()
 
         # Crear el archivo de salida para guardar los datos
-        output_file_path = '/home/santiago/Documents/dispensador/dispensador/resultadosM2_Rojo.txt'
+        output_file_path = '/home/santiago/Documents/dispensador/dispensador/M2_Rojo.txt'
         with open(output_file_path, 'w') as output_file:
-            output_file.write("Tiempo\t PWM \t Velocidad Angular\t RPM \tPeso (g)\t Voltaje \n")
+            output_file.write("Tiempo\t PWM \t Velocidad Angular\t RPM \tPeso (g)\n")
 
             # Bucle principal
-            while time.time() - start_time <= 120:  # Ejecutar durante 120 segundos
-                # Controlar el tiempo de muestreo
-                loop_start_time = t1.tic()
+            print('Iniciando la medición y control de los motores.')
+
+            while time.time() - start_time <= 125 :  # Ejecutar durante 120 segundos
+                loop_start_time = time.time()
                 
                 # Obtener velocidades de los motores
                 line1 = lines[current_line1].strip()
@@ -167,46 +153,36 @@ def control_motores_y_medicion():
                 control_motor(motor2_pwm_pin, motor2_dir_pin, motor2_speed, 'forward')
 
                 # Avanzar en las líneas circularmente
-                current_line1 = (current_line1 + 1) % total_lines
-                current_line2 = (current_line2 + 1) % total_lines
+                if salto_linea == 7:
+                    current_line1 = (current_line1 + 1) % total_lines   
+                    current_line2 = (current_line2 + 1) % total_lines
+                    salto_linea = 0
 
                 # Medir peso
-                peso_actual = hx.get_weight_mean(20)
-
+                if arduino.in_waiting > 0:
+                    peso_actual = arduino.readline().decode('utf-8')
+                    print(peso_actual)
+                
                 # Calcular voltajes
                 v1 = (0.0867 * motor1_speed) + 0.00898
                 v2 = (0.0866 * motor2_speed) + 0.00967
 
                 # Calcular RPM para el motor 1
-                
-
                 flancos_totales_1 = numero_flancos_A + numero_flancos_B
-            
-                RPS = flancos_totales_1 / (600.0 )
-                W = RPS * ((2* pi_m) /INTERVALO)
+                RPS = flancos_totales_1 / (600.0)
+                W = RPS * ((2 * pi_m) / INTERVALO)
                 RPM = W * (30 / pi_m)
 
                 # Calcular RPM para el motor 2
                 flancos_totales_2 = numero_flancos_A2 + numero_flancos_B2
-                RPS2 = flancos_totales_2 / (600.0 )
+                RPS2 = flancos_totales_2 / (600.0)
                 W2 = RPS2 * ((2 * pi_m) / INTERVALO)
                 RPM2 = W2 * (30 / pi_m)
 
-                # Imprimir valores
-                print(numero_flancos_A)
-                print(numero_flancos_A2)
-                print(numero_flancos_B)
-                print(numero_flancos_B2)
-                print(flancos_totales_1)
-                print(flancos_totales_2)
-                print("Revoluciones por segundo M1: {:.4f} | Revoluciones por minuto M1: {:.4f}".format(RPS, RPM))
-                print("Revoluciones por segundo M2: {:.4f} | Revoluciones por minuto M2: {:.4f}".format(RPS2, RPM2))
-                print("El peso actual en gramos es de %.2f" % (peso_actual))
-                print("Voltaje motor 1: {:.2f} | Voltaje motor 2: {:.2f}".format(v1, v2))
-
                 # Registrar los datos en el archivo
                 t = time.time() - start_time
-                output_file.write(f"{t}\t{motor2_speed}\t{W2}\t{RPM2}\t{peso_actual:.2f}\t{v2:.2f}\n")
+                output_file.write(f"{t:.2f}\t{motor2_speed}\t{W2:.2f}\t{RPM2:.2f}\t{peso_actual}")
+                # output_file.write("\n")
                 output_file.flush()  # Asegurarse de guardar los datos
 
                 # Restablecer contadores
@@ -214,13 +190,13 @@ def control_motores_y_medicion():
                 numero_flancos_B = 0
                 numero_flancos_A2 = 0
                 numero_flancos_B2 = 0
+                salto_linea += 1
                 
                 # Controlar el tiempo de muestreo
-                elapsed_time = t1.tocvalue()
-                toc=abs(INTERVALO - elapsed_time)
-                print(elapsed_time)
-                print(toc)
-                time.sleep(toc)
+                elapsed_time = time.time() - loop_start_time
+                sleep_time = INTERVALO - elapsed_time
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
 
             # Deshabilitar motores
             pi.set_PWM_dutycycle(motor1_pwm_pin, 0)
@@ -232,8 +208,8 @@ def control_motores_y_medicion():
             pi.stop()
             print('Tiempo de funcionamiento de los motores completado.')
 
-# Ejecutar la función de calibración de la galga
-calibrar_galga()
+# Esperar a que Arduino complete la inicialización
+esperar_inicializacion_arduino()
 
 # Ejecutar el control de motores y medición
 control_motores_y_medicion()
